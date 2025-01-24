@@ -375,118 +375,97 @@ def main(num_remove_percentage=5, output_csv='unlearning_results.csv'):
         logging.error("No datasets found. Exiting.")
         return
 
-    # Prepare a list to collect results
-    results = []
+    # Ensure CSV file exists with headers if it doesn't already
+    if not os.path.exists(output_csv):
+        with open(output_csv, mode='w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow([
+                'Dataset ID', 'Dataset Name', 'Original Accuracy', 'Original Precision', 'Original Recall',
+                'Original F1', 'Original Log Loss', 'Unlearned Accuracy', 'Unlearned Precision',
+                'Unlearned Recall', 'Unlearned F1', 'Unlearned Log Loss', 'Retrained Accuracy',
+                'Retrained Precision', 'Retrained Recall', 'Retrained F1', 'Retrained Log Loss',
+                'Accuracy Difference', 'Precision Difference', 'Recall Difference', 'F1 Difference',
+                'Log Loss Difference', 'Samples Removed'
+            ])
 
     # For demonstration, we'll process only the first 5 datasets
     for did, name in tqdm(datasets, desc="Processing Datasets"):
         logging.info(f"\nProcessing Dataset ID: {did}, Name: {name}")
-        loaded = load_and_prepare_dataset(did)
-        if loaded is None:
+        try:
+            loaded = load_and_prepare_dataset(did)
+            if loaded is None:
+                logging.warning(f"Dataset {did} could not be loaded. Skipping.")
+                continue
+            X, y, dataset_name = loaded
+
+            # Split into train and test
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+            # Reset indices to ensure alignment
+            X_train = X_train.reset_index(drop=True)
+            y_train = y_train.reset_index(drop=True)
+            X_test = X_test.reset_index(drop=True)
+            y_test = y_test.reset_index(drop=True)
+
+            # Initialize and train the model
+            logging.info("Training the original model...")
+            gbm = GradientBoostedTrees(n_estimators=10, learning_rate=0.1, max_depth=3, min_samples_split=10)
+            gbm.fit(X_train, y_train)
+
+            # Evaluate the model before unlearning
+            acc, prec, rec, f1, ll = evaluate_model(gbm, X_test, y_test)
+            logging.info(f"Original Model - Accuracy: {acc:.4f}, Precision: {prec:.4f}, Recall: {rec:.4f}, F1: {f1:.4f}, Log Loss: {ll:.4f}")
+
+            # Determine the number of samples to remove based on the percentage
+            num_remove = max(1, int((num_remove_percentage / 100) * len(X_train)))
+            # Select random indices to remove
+            indices_to_remove = random.sample(range(len(X_train)), num_remove)
+            logging.info(f"Removing {num_remove} samples ({num_remove_percentage}%) from training data.")
+
+            # Perform unlearning
+            gbm.unlearn(X_train, y_train, indices_to_remove)
+
+            # Evaluate the model after unlearning
+            acc_unlearn, prec_unlearn, rec_unlearn, f1_unlearn, ll_unlearn = evaluate_model(gbm, X_test, y_test)
+            logging.info(f"Unlearned Model - Accuracy: {acc_unlearn:.4f}, Precision: {prec_unlearn:.4f}, Recall: {rec_unlearn:.4f}, F1: {f1_unlearn:.4f}, Log Loss: {ll_unlearn:.4f}")
+
+            # Retrain a baseline model without the removed data
+            logging.info("Retraining the baseline model without the removed samples...")
+            X_train_retrained = X_train.drop(index=indices_to_remove).reset_index(drop=True)
+            y_train_retrained = y_train.drop(index=indices_to_remove).reset_index(drop=True)
+            baseline_model = GradientBoostedTrees(n_estimators=10, learning_rate=0.1, max_depth=3, min_samples_split=10)
+            baseline_model.fit(X_train_retrained, y_train_retrained)
+
+            # Evaluate the baseline model
+            acc_base, prec_base, rec_base, f1_base, ll_base = evaluate_model(baseline_model, X_test, y_test)
+            logging.info(f"Retrained Model - Accuracy: {acc_base:.4f}, Precision: {prec_base:.4f}, Recall: {rec_base:.4f}, F1: {f1_base:.4f}, Log Loss: {ll_base:.4f}")
+
+            # Compare Unlearned Model with Retrained Model
+            acc_diff = abs(acc_unlearn - acc_base)
+            prec_diff = abs(prec_unlearn - prec_base)
+            rec_diff = abs(rec_unlearn - rec_base)
+            f1_diff = abs(f1_unlearn - f1_base)
+            ll_diff = abs(ll_unlearn - ll_base)
+
+            # Append results directly to the CSV file
+            with open(output_csv, mode='a', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow([
+                    did, name, acc, prec, rec, f1, ll,
+                    acc_unlearn, prec_unlearn, rec_unlearn, f1_unlearn, ll_unlearn,
+                    acc_base, prec_base, rec_base, f1_base, ll_base,
+                    acc_diff, prec_diff, rec_diff, f1_diff, ll_diff, num_remove
+                ])
+
+            logging.info(f"Results for Dataset {did} saved to {output_csv}.")
+        
+        except ValueError as ve:
+            logging.error(f"ValueError for Dataset {did} ({name}): {ve}. Skipping.")
             continue
-        X, y, dataset_name = loaded
+        except Exception as e:
+            logging.error(f"Unexpected error for Dataset {did} ({name}): {e}. Skipping.")
+            continue
 
-        # Split into train and test
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-        # Reset indices to ensure alignment
-        X_train = X_train.reset_index(drop=True)
-        y_train = y_train.reset_index(drop=True)
-        X_test = X_test.reset_index(drop=True)
-        y_test = y_test.reset_index(drop=True)
-
-        # Initialize and train the model
-        logging.info("Training the original model...")
-        gbm = GradientBoostedTrees(n_estimators=10, learning_rate=0.1, max_depth=3, min_samples_split=10)
-        gbm.fit(X_train, y_train)
-
-        # Evaluate the model before unlearning
-        acc, prec, rec, f1, ll = evaluate_model(gbm, X_test, y_test)
-        logging.info(f"Original Model - Accuracy: {acc:.4f}, Precision: {prec:.4f}, Recall: {rec:.4f}, F1: {f1:.4f}, Log Loss: {ll:.4f}")
-
-        # Determine the number of samples to remove based on the percentage
-        num_remove = max(1, int((num_remove_percentage / 100) * len(X_train)))
-        # Select random indices to remove
-        indices_to_remove = random.sample(range(len(X_train)), num_remove)
-        logging.info(f"Removing {num_remove} samples ({num_remove_percentage}%) from training data.")
-
-        # Perform unlearning
-        gbm.unlearn(X_train, y_train, indices_to_remove)
-
-        # Evaluate the model after unlearning
-        acc_unlearn, prec_unlearn, rec_unlearn, f1_unlearn, ll_unlearn = evaluate_model(gbm, X_test, y_test)
-        logging.info(f"Unlearned Model - Accuracy: {acc_unlearn:.4f}, Precision: {prec_unlearn:.4f}, Recall: {rec_unlearn:.4f}, F1: {f1_unlearn:.4f}, Log Loss: {ll_unlearn:.4f}")
-
-        # Retrain a baseline model without the removed data
-        logging.info("Retraining the baseline model without the removed samples...")
-        X_train_retrained = X_train.drop(index=indices_to_remove).reset_index(drop=True)
-        y_train_retrained = y_train.drop(index=indices_to_remove).reset_index(drop=True)
-        baseline_model = GradientBoostedTrees(n_estimators=10, learning_rate=0.1, max_depth=3, min_samples_split=10)
-        baseline_model.fit(X_train_retrained, y_train_retrained)
-
-        # Evaluate the baseline model
-        acc_base, prec_base, rec_base, f1_base, ll_base = evaluate_model(baseline_model, X_test, y_test)
-        logging.info(f"Retrained Model - Accuracy: {acc_base:.4f}, Precision: {prec_base:.4f}, Recall: {rec_base:.4f}, F1: {f1_base:.4f}, Log Loss: {ll_base:.4f}")
-
-        # Compare Unlearned Model with Retrained Model
-        logging.info("Comparison between Unlearned Model and Retrained Model:")
-        acc_diff = abs(acc_unlearn - acc_base)
-        prec_diff = abs(prec_unlearn - prec_base)
-        rec_diff = abs(rec_unlearn - rec_base)
-        f1_diff = abs(f1_unlearn - f1_base)
-        ll_diff = abs(ll_unlearn - ll_base)
-        logging.info(f"Accuracy Difference: {acc_diff:.4f}")
-        logging.info(f"Precision Difference: {prec_diff:.4f}")
-        logging.info(f"Recall Difference: {rec_diff:.4f}")
-        logging.info(f"F1 Score Difference: {f1_diff:.4f}")
-        logging.info(f"Log Loss Difference: {ll_diff:.4f}")
-
-        # Append results to the list
-        results.append({
-            'Dataset ID': did,
-            'Dataset Name': name,
-            'Original Accuracy': acc,
-            'Original Precision': prec,
-            'Original Recall': rec,
-            'Original F1': f1,
-            'Original Log Loss': ll,
-            'Unlearned Accuracy': acc_unlearn,
-            'Unlearned Precision': prec_unlearn,
-            'Unlearned Recall': rec_unlearn,
-            'Unlearned F1': f1_unlearn,
-            'Unlearned Log Loss': ll_unlearn,
-            'Retrained Accuracy': acc_base,
-            'Retrained Precision': prec_base,
-            'Retrained Recall': rec_base,
-            'Retrained F1': f1_base,
-            'Retrained Log Loss': ll_base,
-            'Accuracy Difference': acc_diff,
-            'Precision Difference': prec_diff,
-            'Recall Difference': rec_diff,
-            'F1 Difference': f1_diff,
-            'Log Loss Difference': ll_diff,
-            'Samples Removed': num_remove
-        })
-
-    # Convert results to DataFrame
-    results_df = pd.DataFrame(results)
-
-    # Define CSV file path
-    csv_file = output_csv
-
-    # Check if the file already exists
-    if os.path.exists(csv_file):
-        # If it exists, append without headers
-        results_df.to_csv(csv_file, mode='a', index=False, header=False)
-    else:
-        # If it does not exist, write with headers
-        results_df.to_csv(csv_file, mode='w', index=False)
-
-    logging.info(f"\nAll results have been written to {csv_file}")
-
-    # Optionally, display the results
-    print("\nSummary of Results:")
-    print(results_df)
     
     # Optional: Implement membership inference tests here
 
