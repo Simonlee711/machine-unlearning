@@ -16,6 +16,7 @@ import logging
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import random  # Importing random module
+import os  # For checking file existence
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -70,10 +71,10 @@ class DecisionTree:
         best_threshold = None
 
         for feature in self.features:
-            unique_values = X[feature].unique()
+            unique_values = np.unique(X[feature])
             if len(unique_values) <= 1:
                 continue
-            thresholds = unique_values[:-1]
+            thresholds = unique_values[:-1]  # Exclude the last value to prevent empty splits
             for threshold in thresholds:
                 left = X[feature] <= threshold
                 right = X[feature] > threshold
@@ -122,12 +123,19 @@ class DecisionTree:
         """
         def traverse(node):
             if node['type'] == 'leaf':
-                # Check how many samples in this leaf are being removed
+                # Check which samples in this leaf are being removed
                 removed_in_leaf = [idx for idx in samples_to_remove if idx in node['samples']]
                 if removed_in_leaf:
-                    # Update gradients and hessians by removing the contributions
-                    new_grad_sum = np.sum(g_remove[node['samples']]) - np.sum(g_remove[removed_in_leaf])
-                    new_hess_sum = np.sum(h_remove[node['samples']]) - np.sum(h_remove[removed_in_leaf])
+                    # Calculate the new gradient and hessian sums after removal
+                    current_grad_sum = np.sum(g_remove[node['samples']])
+                    current_hess_sum = np.sum(h_remove[node['samples']])
+                    removed_grad_sum = np.sum(g_remove[removed_in_leaf])
+                    removed_hess_sum = np.sum(h_remove[removed_in_leaf])
+
+                    new_grad_sum = current_grad_sum - removed_grad_sum
+                    new_hess_sum = current_hess_sum - removed_hess_sum
+
+                    # Update the leaf weight
                     node['weight'] = -new_grad_sum / (new_hess_sum + 1e-6)
             else:
                 traverse(node['left'])
@@ -162,6 +170,7 @@ class GradientBoostedTrees:
             g = p - y
             h = p * (1 - p)
 
+            # Store gradients and hessians as NumPy arrays
             self.sample_gradients.append(g.copy())
             self.sample_hessians.append(h.copy())
 
@@ -169,14 +178,15 @@ class GradientBoostedTrees:
             tree.fit(X, y, g, h)
             self.trees.append(tree)
 
-            for idx, row in X.iterrows():
-                self.F[idx] += self.learning_rate * tree.predict_single(row)
+            # Update F using vectorized operations for efficiency
+            predictions = X.apply(lambda row: tree.predict_single(row), axis=1).values
+            self.F += self.learning_rate * predictions
 
     def predict_proba(self, X):
         F = np.full(X.shape[0], self.init_score)
         for tree in self.trees:
-            for idx, row in X.iterrows():
-                F[idx] += self.learning_rate * tree.predict_single(row)
+            predictions = X.apply(lambda row: tree.predict_single(row), axis=1).values
+            F += self.learning_rate * predictions
         return self.sigmoid(F)
 
     def predict(self, X, threshold=0.5):
@@ -189,6 +199,7 @@ class GradientBoostedTrees:
         for tree_idx, tree in enumerate(self.trees):
             g = self.sample_gradients[tree_idx]
             h = self.sample_hessians[tree_idx]
+            # Ensure indices_to_remove are within the current gradients array
             samples_in_tree = [idx for idx in indices_to_remove if idx < len(g)]
 
             if not samples_in_tree:
@@ -198,14 +209,14 @@ class GradientBoostedTrees:
             tree.update_leaf(samples_in_tree, g, h)
 
             # Zero out the gradients and hessians for the removed samples
-            self.sample_gradients[tree_idx][samples_in_tree] = 0.0
-            self.sample_hessians[tree_idx][samples_in_tree] = 0.0
+            g[samples_in_tree] = 0.0
+            h[samples_in_tree] = 0.0
 
         logging.info("Recomputing predictions after unlearning.")
         self.F = np.full(len(y), self.init_score)
         for tree in self.trees:
-            for idx, row in X.iterrows():
-                self.F[idx] += self.learning_rate * tree.predict_single(row)
+            predictions = X.apply(lambda row: tree.predict_single(row), axis=1).values
+            self.F += self.learning_rate * predictions
 
         logging.info("Unlearning process completed.")
 
@@ -214,26 +225,23 @@ file_path = './X_mimic_iv.csv.gz'  # Update with your file path
 
 # For demonstration purposes, let's create a mock dataset
 # Remove the following block if you have the actual dataset
-if not pd.io.common.file_exists(file_path):
+if not os.path.exists(file_path):
     np.random.seed(42)
     data = pd.DataFrame({
-        'feature1': np.random.randn(100),
-        'feature2': np.random.randn(100),
-        'feature3': np.random.randn(100),
-        'death': np.random.randint(0, 2, 100),
-        'subject_id': np.arange(100),
-        'time': np.random.randint(1, 100, 100),
-        'Unnamed: 0.1': np.random.randn(100),
-        'gender': np.random.choice(['M', 'F'], 100)
+        'feature1': np.random.randn(1000),
+        'feature2': np.random.randn(1000),
+        'feature3': np.random.randn(1000),
+        'death': np.random.randint(0, 2, 1000),
+        'subject_id': np.arange(1000),
+        'time': np.random.randint(1, 100, 1000),
+        'Unnamed: 0.1': np.random.randn(1000),
+        'gender': np.random.choice(['M', 'F'], 1000)
     })
     data.to_csv(file_path, index=False, compression='gzip')
 
 # Read the dataset
 data = pd.read_csv(file_path, compression='gzip')
-
-# Sample 100 rows for testing (adjust as needed)
-# data = data.sample(100, random_state=42).reset_index(drop=True)
-
+data = data.sample(100)
 # Preprocess the dataset
 X = data.drop(columns=['death', 'subject_id', 'time', 'Unnamed: 0.1', 'gender'])
 y = data['death']
@@ -292,15 +300,12 @@ test_performance = dict(zip(metrics, test_results))
 print("Test Performance:", test_performance)
 
 # Function to simulate membership inference attack and calculate AUC
-def membership_inference_attack_auc(model, X, y, removed_indices):
+def membership_inference_attack_auc(model, X, labels):
     """
     Performs a membership inference attack by comparing the predictions of removed
     and non-removed samples. Returns the AUC and ROC curve data.
     """
     predictions = model.predict_proba(X)
-    # Label samples: 1 for removed, 0 for non-removed
-    labels = np.zeros(len(predictions))
-    labels[removed_indices] = 1
 
     # Generate the attack predictions (confidence of membership)
     attack_confidences = predictions
@@ -315,6 +320,10 @@ def membership_inference_attack_auc(model, X, y, removed_indices):
 unlearning_percentage = 0.1  # 10% of the training data
 num_samples_to_remove = max(1, int(unlearning_percentage * len(X_train_scaled)))  # Ensure at least one sample is removed
 removed_indices = random.sample(list(X_train_scaled.index), num_samples_to_remove)
+
+# Store the removed samples before dropping
+X_removed = X_train_scaled.loc[removed_indices].copy()
+y_removed = y_train.loc[removed_indices].copy()
 
 # Perform unlearning on the original model
 gbt_model.unlearn(X_train_scaled, y_train, removed_indices)
@@ -331,24 +340,45 @@ baseline_model = GradientBoostedTrees(
 )
 baseline_model.fit(X_retrained, y_retrained)
 
-# Perform membership inference attack
-auc, fpr, tpr = membership_inference_attack_auc(gbt_model, X_train_scaled, y_train, removed_indices)
-auc2, fpr2, tpr2 = membership_inference_attack_auc(baseline_model, X_retrained, y_retrained, removed_indices)
+# Prepare attack datasets
 
-# Plot the ROC curve
+# For Original Model:
+# Assume attacker has access to all training data and wants to know if a sample was removed
+# Labels: 1 for removed samples, 0 for non-removed samples
+attack_X_original = X_train_scaled.copy()
+labels_original = np.zeros(len(attack_X_original))
+labels_original[removed_indices] = 1
+
+# For Baseline Model:
+# The baseline model was trained without the removed samples
+# To perform a fair attack, combine the remaining training samples with the removed samples
+attack_X_baseline = pd.concat([X_retrained, X_removed], ignore_index=True)
+labels_baseline = np.concatenate([np.zeros(len(X_retrained)), np.ones(len(X_removed))])
+
+# Perform membership inference attack on Original Model
+auc_original, fpr_original, tpr_original = membership_inference_attack_auc(
+    gbt_model, attack_X_original, labels_original
+)
+
+# Perform membership inference attack on Baseline Model
+auc_baseline, fpr_baseline, tpr_baseline = membership_inference_attack_auc(
+    baseline_model, attack_X_baseline, labels_baseline
+)
+
+# Plot the ROC curves
 plt.figure(figsize=(8, 6))
-plt.plot(fpr, tpr, label=f"Attack ROC (AUC = {auc:.2f})")
-plt.plot(fpr2, tpr2, label=f"Baseline ROC (AUC = {auc2:.2f})", linestyle='--')
+plt.plot(fpr_original, tpr_original, label=f"Original Model ROC (AUC = {auc_original:.2f})")
+plt.plot(fpr_baseline, tpr_baseline, label=f"Baseline Model ROC (AUC = {auc_baseline:.2f})", linestyle='--')
 plt.plot([0, 1], [0, 1], linestyle="--", color="gray", label="Random Guess")
 plt.xlabel("False Positive Rate (FPR)")
 plt.ylabel("True Positive Rate (TPR)")
-plt.title("Membership Inference Attack ROC Curve")
+plt.title("Membership Inference Attack ROC Curves")
 plt.legend(loc="best")
 plt.grid(True)
 plt.show()
 
 # Display AUC scores
-print(f"Membership Inference Attack AUC (Original Model): {auc:.2f}")
-print(f"Membership Inference Attack AUC (Baseline Model): {auc2:.2f}")
+print(f"Membership Inference Attack AUC (Original Model): {auc_original:.2f}")
+print(f"Membership Inference Attack AUC (Baseline Model): {auc_baseline:.2f}")
 
 # %%
